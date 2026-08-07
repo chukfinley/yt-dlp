@@ -12,6 +12,7 @@ from ..utils import (
     ExtractorError,
     bug_reports_message,
     decode_base_n,
+    determine_ext,
     encode_base_n,
     filter_dict,
     float_or_none,
@@ -19,6 +20,7 @@ from ..utils import (
     get_element_by_attribute,
     int_or_none,
     join_nonempty,
+    parse_qs,
     str_or_none,
     traverse_obj,
     url_or_none,
@@ -167,19 +169,64 @@ class InstagramBaseIE(InfoExtractor):
         if dash:
             formats.extend(self._parse_mpd_formats(self._parse_xml(dash, video_id), mpd_id='dash'))
 
+        images = list(reversed(traverse_obj(product_media, (
+            'image_versions2', 'candidates',
+            lambda _, v: url_or_none(v['url']), {
+                'url': 'url',
+                'width': ('width', {int}),
+                'height': 'height',
+            },
+        ))))
+        original_size = (
+            traverse_obj(product_media, ('original_width', {int_or_none})),
+            traverse_obj(product_media, ('original_height', {int_or_none})))
+        for image in images:
+            self._fill_in_image_metadata(image, original_size)
+
+        thumbnails = images
+        if not formats:
+            # Photo post: offer the image candidates as formats so that they can
+            # be downloaded. For a video post the same candidates are only the
+            # thumbnails of the video, so they must not become formats there.
+            # They are also dropped as thumbnails here, since a thumbnail file
+            # would end up with the same name as the image that was downloaded.
+            formats = [{
+                **image,
+                'format_id': join_nonempty('image', image.get('width')),
+            } for image in images]
+            self._remove_duplicate_formats(formats)
+            thumbnails = []
+
         return {
             'id': video_id,
             'formats': formats,
             'duration': traverse_obj(product_media, ('video_duration', {float_or_none})),
-            'thumbnails': list(reversed(traverse_obj(product_media, (
-                'image_versions2', 'candidates',
-                lambda _, v: url_or_none(v['url']), {
-                    'url': 'url',
-                    'width': ('width', {int}),
-                    'height': 'height',
-                },
-            )))),
+            'thumbnails': thumbnails,
         }
+
+    @staticmethod
+    def _fill_in_image_metadata(image, original_size):
+        # The candidates carry neither dimensions nor a usable extension: the
+        # path is always the original upload (often .heic) while the CDN
+        # transcodes and resizes it according to the `stp` query parameter,
+        # e.g. `c0.179.1440.1440a_dst-jpg_e35_s640x640_tt6` -> a 640x640-boxed
+        # JPEG. A sizeless `stp` means the image is served as uploaded.
+        stp = traverse_obj(parse_qs(image['url']), ('stp', 0, {str}), default='')
+        dst = re.search(r'dst-([a-zA-Z0-9]+)', stp)
+        image['ext'] = dst.group(1) if dst else determine_ext(image['url'], 'jpg')
+
+        if image.get('width') and image.get('height'):
+            return
+        box = re.search(r'_[sp](\d+)x(\d+)', stp)
+        if not box:
+            image['width'], image['height'] = original_size
+        elif all(original_size):
+            # The box is a bounding box; the image keeps its aspect ratio
+            scale = min(int(box.group(1)) / original_size[0], int(box.group(2)) / original_size[1], 1)
+            image['width'] = round(original_size[0] * scale)
+            image['height'] = round(original_size[1] * scale)
+        else:
+            image['width'], image['height'] = int(box.group(1)), int(box.group(2))
 
     def _extract_product(self, product_info, video_id=None, get_comments=True):
         if isinstance(product_info, list):
