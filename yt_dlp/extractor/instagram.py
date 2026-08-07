@@ -204,8 +204,15 @@ class InstagramBaseIE(InfoExtractor):
             'thumbnails': thumbnails,
         }
 
-    @staticmethod
-    def _fill_in_image_metadata(image, original_size):
+    # `stp` transcode targets mapped onto extensions the downloader accepts;
+    # `jpegr` is a JPEG carrying an HDR gain map, so it decodes as a JPEG
+    _IMAGE_EXTS = {
+        'jpg': 'jpg', 'jpeg': 'jpg', 'jpegr': 'jpg',
+        'png': 'png', 'webp': 'webp', 'heic': 'heic', 'avif': 'avif', 'gif': 'gif',
+    }
+
+    @classmethod
+    def _fill_in_image_metadata(cls, image, original_size):
         # The candidates carry neither dimensions nor a usable extension: the
         # path is always the original upload (often .heic) while the CDN
         # transcodes and resizes it according to the `stp` query parameter,
@@ -213,7 +220,8 @@ class InstagramBaseIE(InfoExtractor):
         # JPEG. A sizeless `stp` means the image is served as uploaded.
         stp = traverse_obj(parse_qs(image['url']), ('stp', 0, {str}), default='')
         dst = re.search(r'dst-([a-zA-Z0-9]+)', stp)
-        image['ext'] = dst.group(1) if dst else determine_ext(image['url'], 'jpg')
+        image['ext'] = cls._IMAGE_EXTS.get(
+            dst.group(1).lower() if dst else determine_ext(image['url']), 'jpg')
 
         if image.get('width') and image.get('height'):
             return
